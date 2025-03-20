@@ -32,12 +32,16 @@ def detect_pieces(img, output_folder="detected_pieces"):
         os.makedirs(output_folder)
 
     piece_count = 0
+    margin = 20
     for contour in contours:
         x, y, w, h = cv.boundingRect(contour)
 
         # Filtrer les petits objets pour éviter le bruit
         if w > 30 and h > 30:
-            piece_img = img[y:y + h, x:x + w]  # Extraire la pièce
+            piece_img = img[
+                        y - margin:y + h + margin,
+                        x - margin:x + w + margin
+                        ]  # Extraire la pièce
             piece_filename = os.path.join(output_folder, f"piece_{piece_count}.jpg")
             cv.imwrite(piece_filename, piece_img)  # Sauvegarder la pièce
             piece_count += 1
