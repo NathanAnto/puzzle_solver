@@ -1,78 +1,78 @@
 import cv2
 import numpy as np
+import os
 
-# Charger l'image
-image_path = "pieces_convert/puzzle_contour_remplie.jpg"
-image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+# Dossier contenant les pièces remplies
+input_folder = "pieces_remplie"
 
-# Trouver les contours
-contours, _ = cv2.findContours(image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-contour_puzzle = max(contours, key=cv2.contourArea)  # Prendre le plus grand contour
+# Lister toutes les images
+for filename in os.listdir(input_folder):
+    if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+        image_path = os.path.join(input_folder, filename)
+        image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
 
-# Convertir en format couleur pour annotation
-image_color = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        if image is None:
+            print(f"Erreur de lecture : {filename}")
+            continue
 
-# Appliquer la détection des coins de Harris
-dst = cv2.cornerHarris(image, blockSize=2, ksize=3, k=0.04)
+        print(f"Traitement de : {filename}")
 
-# Dilater pour mieux voir les coins détectés
-dst = cv2.dilate(dst, None)
+        # --- Détection des coins de Harris ---
+        image_color = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        dst = cv2.cornerHarris(image, blockSize=2, ksize=3, k=0.04)
+        dst = cv2.dilate(dst, None)
+        image_color[dst > 0.01 * dst.max()] = [0, 0, 0]  # Rouge pour les coins
 
-# Seuil pour conserver les meilleurs coins
-image_color[dst > 0.01 * dst.max()] = [0, 0, 0]  # Rouge pour les coins
+        #cv2.imshow("Coins détectés", image_color)
+        #cv2.waitKey(0)
+        #cv2.destroyAllWindows()
 
-# Afficher le résultat
-'''
-cv2.imshow("Coins détectés", image_color)
-cv2.waitKey(0)
-cv2.destroyAllWindows()
-'''
-# Détection des contours pour la transformée de Hough
-edges = cv2.Canny(image, 50, 150, apertureSize=3)
+        # --- Détection des lignes (Hough) ---
+        edges = cv2.Canny(image, 50, 150, apertureSize=3)
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=25, minLineLength=10, maxLineGap=500000)
 
-# Trouver les lignes avec HoughLinesP
-lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=25, minLineLength=10, maxLineGap=500000)
+        image_lines = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                cv2.line(image_lines, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-# Dessiner les lignes détectées
+        #cv2.imshow("Lignes détectées (Hough)", image_lines)
+        #cv2.waitKey(0)
+        #cv2.destroyAllWindows()
 
-image_lines = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-for line in lines:
-    x1, y1, x2, y2 = line[0]
-    cv2.line(image_lines, (x1, y1), (x2, y2), (0, 255, 0), 2)  # Vert pour les lignes
-'''
-# Afficher l’image avec les lignes détectées
-cv2.imshow("Lignes détectées (Hough)", image_lines)
-cv2.waitKey(0)
-cv2.destroyAllWindows()
-'''
+        # --- Sélection des 4 côtés extrêmes ---
+        if lines is not None and len(lines) >= 4:
+            horizontal_lines = []
+            vertical_lines = []
 
-# Filtrer les lignes pour obtenir les 4 meilleures
-horizontal_lines = []
-vertical_lines = []
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                if abs(y2 - y1) < abs(x2 - x1):  # horizontale
+                    horizontal_lines.append(line[0])
+                else:
+                    vertical_lines.append(line[0])
 
-for line in lines:
-    x1, y1, x2, y2 = line[0]
-    if abs(y2 - y1) < abs(x2 - x1):  # Ligne horizontale
-        horizontal_lines.append(line[0])
-    else:  # Ligne verticale
-        vertical_lines.append(line[0])
+            if len(horizontal_lines) >= 2 and len(vertical_lines) >= 2:
+                horizontal_lines = sorted(horizontal_lines, key=lambda x: x[1])
+                vertical_lines = sorted(vertical_lines, key=lambda x: x[0])
 
-# Trier les lignes pour prendre les plus extrêmes
-horizontal_lines = sorted(horizontal_lines, key=lambda x: x[1])  # Haut vers Bas
-vertical_lines = sorted(vertical_lines, key=lambda x: x[0])  # Gauche vers Droite
+                top_line = horizontal_lines[0]
+                bottom_line = horizontal_lines[-1]
+                left_line = vertical_lines[0]
+                right_line = vertical_lines[-1]
 
-# Sélectionner les 2 meilleures lignes horizontales et verticales
-top_line = horizontal_lines[0]
-bottom_line = horizontal_lines[-1]
-left_line = vertical_lines[0]
-right_line = vertical_lines[-1]
+                # Redessiner sur une copie
+                final_image = image_color.copy()
+                cv2.line(final_image, (top_line[0], top_line[1]), (top_line[2], top_line[3]), (255, 0, 255), 2)
+                cv2.line(final_image, (bottom_line[0], bottom_line[1]), (bottom_line[2], bottom_line[3]), (255, 0, 0), 2)
+                cv2.line(final_image, (left_line[0], left_line[1]), (left_line[2], left_line[3]), (0, 255, 255), 2)
+                cv2.line(final_image, (right_line[0], right_line[1]), (right_line[2], right_line[3]), (0, 255, 0), 2)
 
-# Dessiner sur l’image
-cv2.line(image_color, (top_line[0], top_line[1]), (top_line[2], top_line[3]), (255, 0, 255), 2)  # Bleu
-cv2.line(image_color, (bottom_line[0], bottom_line[1]), (bottom_line[2], bottom_line[3]), (255, 0, 0), 2)  # Bleu
-cv2.line(image_color, (left_line[0], left_line[1]), (left_line[2], left_line[3]), (0, 255, 255), 2)  # Vert
-cv2.line(image_color, (right_line[0], right_line[1]), (right_line[2], right_line[3]), (0, 255, 0), 2)  # Vert
-
-cv2.imshow("Côtés détectés", image_color)
-cv2.waitKey(0)
-cv2.destroyAllWindows()
+                cv2.imshow("Côtés détectés", final_image)
+                cv2.waitKey(0)
+                cv2.destroyAllWindows()
+            else:
+                print("Pas assez de lignes pour détecter les 4 côtés.")
+        else:
+            print("Pas de lignes détectées.")

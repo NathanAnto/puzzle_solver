@@ -1,32 +1,37 @@
 import cv2
 import numpy as np
+import os
 import matplotlib.pyplot as plt
 
-# Charger l'image
-image_path = "pieces_convert/puzzle_contour.jpg"
-image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+# Dossiers
+input_folder = "pieces_contour"
+output_folder = "pieces_remplie"
+os.makedirs(output_folder, exist_ok=True)
 
-# Appliquer un seuillage pour binariser l'image
-_, binary = cv2.threshold(image, 127, 255, cv2.THRESH_BINARY_INV)
+# Lister tous les fichiers d'image dans le dossier d'entrée
+for filename in os.listdir(input_folder):
+    if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+        image_path = os.path.join(input_folder, filename)
+        image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
 
-# Trouver les contours
-contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if image is None:
+            print(f"Impossible de lire l'image : {filename}")
+            continue
 
-# Créer une image de même taille remplie de noir
-filled_image = np.zeros_like(binary)
+        # Appliquer un seuillage pour binariser l'image
+        _, binary = cv2.threshold(image, 127, 255, cv2.THRESH_BINARY_INV)
 
-# Remplir les contours détectés
-cv2.drawContours(filled_image, contours, -1, (255), thickness=cv2.FILLED)
+        # Trouver les contours
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-# Afficher le résultat
-plt.figure(figsize=(10,5))
-plt.subplot(1,2,1)
-plt.title("Contour détecté")
-plt.imshow(binary, cmap='gray')
+        # Créer une image de même taille remplie de noir
+        filled_image = np.zeros_like(binary)
 
-plt.subplot(1,2,2)
-plt.title("Contour rempli")
-plt.imshow(filled_image, cmap='gray')
-plt.show()
+        # Remplir les contours détectés
+        cv2.drawContours(filled_image, contours, -1, (255), thickness=cv2.FILLED)
 
-cv2.imwrite("pieces_convert/puzzle_contour_remplie.jpg", filled_image)
+        # Sauvegarder l'image résultante
+        output_path = os.path.join(output_folder, f"remplie_{filename}")
+        cv2.imwrite(output_path, filled_image)
+
+        print(f"Image remplie sauvegardée : {output_path}")
