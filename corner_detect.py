@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 import os
-
+import re
 
 # ---------------------------
 # Fonctions utilitaires
@@ -20,7 +20,6 @@ def line_intersection(line1, line2):
     py = ((x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)) / denom
     return (int(px), int(py))
 
-
 def reorder_points_clockwise(pts):
     """
     Réordonne une liste de points (x,y) en sens horaire autour du centre.
@@ -30,7 +29,6 @@ def reorder_points_clockwise(pts):
     angles = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
     idx_sorted = np.argsort(angles)
     return pts[idx_sorted]
-
 
 def sample_patch(image, center, normal, distance, window_size=5):
     """
@@ -51,22 +49,26 @@ def sample_patch(image, center, normal, distance, window_size=5):
         return 0
     return np.mean(patch)
 
-
-def extract_edge_patch(image, pt1, pt2, patch_width, patch_height, direction):
+def extract_edge_patch(image, pt1, pt2, patch_width, patch_height, direction, offset=0):
     """
     Extrait un patch rectifié le long du segment [pt1, pt2].
     - patch_width est la largeur (souvent égale à la longueur du segment).
-    - patch_height est la hauteur (base + extension si male/femelle).
+    - patch_height est la hauteur (base + extension).
     - direction (1 ou -1) détermine de quel côté de la droite extraire le patch.
+    - offset permet de décaler la zone extraite le long de la normale.
     """
     dx, dy = pt2[0] - pt1[0], pt2[1] - pt1[1]
     length = np.hypot(dx, dy)
     if length < 1e-6:
         return None
     dir_x, dir_y = dx / length, dy / length
-    # Normal de base (la fonction utilisera -dy, dx multiplié par direction)
+    # Calcul de la normale (multipliée par la direction)
     nx, ny = -dir_y * direction, dir_x * direction
+    # Calcul du centre du segment
     cx, cy = (pt1[0] + pt2[0]) / 2.0, (pt1[1] + pt2[1]) / 2.0
+    # Application de l'offset le long de la normale
+    cx += nx * offset
+    cy += ny * offset
     src_pts = np.float32([
         [cx - dir_x * patch_width / 2 - nx * patch_height / 2, cy - dir_y * patch_width / 2 - ny * patch_height / 2],
         [cx + dir_x * patch_width / 2 - nx * patch_height / 2, cy + dir_y * patch_width / 2 - ny * patch_height / 2],
@@ -77,7 +79,6 @@ def extract_edge_patch(image, pt1, pt2, patch_width, patch_height, direction):
     patch = cv2.warpAffine(image, M, (patch_width, patch_height))
     return patch
 
-
 # ---------------------------
 # Paramètres et dossiers
 # ---------------------------
@@ -85,15 +86,18 @@ input_folder = "pieces_remplie"
 output_folder = "cotes_extraits"
 os.makedirs(output_folder, exist_ok=True)
 
+# Dossier contenant les pièces en couleur
+color_pieces_folder = "detected_pieces"
+
 # Paramètres d'échantillonnage pour la classification
-sample_distance = 10  # distance en pixels pour échantillonner le profil
-window_size = 5  # taille de la fenêtre pour l'échantillonnage
-white_thresh = 200  # seuil pour considérer qu'un patch est blanc (male)
-black_thresh = 50  # seuil pour considérer qu'un patch est noir (femelle)
+sample_distance = 10      # distance en pixels pour échantillonner le profil
+window_size = 5           # taille de la fenêtre pour l'échantillonnage
+white_thresh = 200        # seuil pour considérer qu'un patch est blanc (male)
+black_thresh = 50         # seuil pour considérer qu'un patch est noir (femelle)
 
 # Paramètres pour l'extraction du patch
-base_patch_height = 60  # hauteur de base
-extension_value = 65  # extension à ajouter en cas de male ou femelle
+base_patch_height = 60    # hauteur de base
+extension_value = 65      # extension à ajouter en cas de male ou femelle
 
 # ---------------------------
 # Traitement de chaque image
@@ -167,10 +171,10 @@ for filename in os.listdir(input_folder):
 
     # Association des côtés du quadrilatère
     edges_dict = {
-        "top": (corners[0], corners[1]),
-        "right": (corners[1], corners[2]),
+        "top":    (corners[0], corners[1]),
+        "right":  (corners[1], corners[2]),
         "bottom": (corners[2], corners[3]),
-        "left": (corners[3], corners[0])
+        "left":   (corners[3], corners[0])
     }
 
     # Pour chaque côté, échantillonne un profil et détermine la classification
@@ -183,7 +187,7 @@ for filename in os.listdir(input_folder):
             continue
         # Calcul de la normale de base (avec (-dy, dx)) et normalisation
         base_normal = np.array([-dy, dx]) / length
-        # Calcul du vecteur du milieu vers le centre
+        # Vecteur du milieu vers le centre
         vec_center = np.array(center) - np.array(mid)
         vec_center_norm = vec_center / (np.linalg.norm(vec_center) + 1e-6)
         # Détermination des normales intérieure et extérieure
@@ -214,8 +218,7 @@ for filename in os.listdir(input_folder):
         seg_length = int(length)  # largeur du patch égale à la longueur du segment
 
         # Choix de la direction d'extraction :
-        # Utilisons la fonction get_patch_direction issue du code précédent.
-        # Ici, on veut extraire vers l'extérieur pour "male" et vers l'intérieur pour "femelle".
+        # Ici, on choisit d'extraire vers l'extérieur pour "male" et vers l'intérieur pour "femelle"
         base_dir = 1 if np.dot(np.array([-dy, dx]), vec_center_norm) >= 0 else -1
         if classification == "male":
             extraction_direction = -base_dir
@@ -224,9 +227,31 @@ for filename in os.listdir(input_folder):
         else:
             extraction_direction = base_dir
 
+        # Extraction du patch en niveau de couleur (issu de pieces_remplie)
         patch = extract_edge_patch(image_color, pt1, pt2, seg_length, final_patch_height, extraction_direction)
         if patch is not None:
             outname = f"{os.path.splitext(filename)[0]}_{side_name}_{classification}.png"
             out_path = os.path.join(output_folder, outname)
             cv2.imwrite(out_path, patch)
             print(f"Patch '{side_name}' ({classification}) sauvegardé : {out_path}")
+
+        # --- Export en couleur depuis l'image originale de la pièce ---
+        # Extraction du numéro de pièce à partir du nom du fichier.
+        match = re.search(r'piece_(\d+)', filename)
+        if match:
+            piece_number = match.group(1)
+            color_piece_filename = f"piece_{piece_number}.jpg"
+            color_piece_path = os.path.join(color_pieces_folder, color_piece_filename)
+            color_piece = cv2.imread(color_piece_path, cv2.IMREAD_COLOR)
+            if color_piece is None:
+                print(f"Erreur de lecture de l'image couleur : {color_piece_path}")
+            else:
+                # Extraction du patch couleur depuis l'image couleur de la pièce
+                patch_color = extract_edge_patch(color_piece, pt1, pt2, seg_length, final_patch_height, extraction_direction)
+                if patch_color is not None:
+                    outname_color = f"{os.path.splitext(filename)[0]}_{side_name}_{classification}_color.png"
+                    out_path_color = os.path.join(output_folder, outname_color)
+                    cv2.imwrite(out_path_color, patch_color)
+                    print(f"Patch couleur '{side_name}' ({classification}) sauvegardé : {out_path_color}")
+        else:
+            print(f"Impossible d'extraire le numéro de pièce depuis {filename}")
