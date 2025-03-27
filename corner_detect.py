@@ -93,7 +93,7 @@ black_thresh = 50  # seuil pour considérer qu'un patch est noir (femelle)
 
 # Paramètres pour l'extraction du patch
 base_patch_height = 60  # hauteur de base
-extension_value = 20  # extension à ajouter en cas de male ou femelle
+extension_value = 65  # extension à ajouter en cas de male ou femelle
 
 # ---------------------------
 # Traitement de chaque image
