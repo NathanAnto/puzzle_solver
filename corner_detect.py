@@ -166,7 +166,7 @@ for filename in os.listdir(input_folder):
     cv2.line(vis, left_line[:2], left_line[2:], (0, 255, 255), 2)
     cv2.line(vis, right_line[:2], right_line[2:], (0, 255, 0), 2)
     cv2.imshow("Coins et lignes", vis)
-    cv2.waitKey(500)
+    cv2.waitKey(0)
     cv2.destroyAllWindows()
 
     # Association des côtés du quadrilatère
