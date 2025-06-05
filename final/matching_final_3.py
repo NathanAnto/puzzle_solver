@@ -1,11 +1,15 @@
 import numpy as np
 import json
 import time
+import random
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 from scipy.spatial.distance import euclidean
 import cv2
-
+import math
+import matplotlib.pyplot as plt
+import os
+from PIL import Image
 
 @dataclass
 class PieceInfo:
@@ -28,27 +32,29 @@ class MatchScore:
     is_valid: bool
 
 
-class PuzzleMatcher:
-    def __init__(self, puzzle_data_path: str, grid_size: Tuple[int, int] = (6, 4)):
+class DFSPuzzleSolver:
+    def __init__(self, puzzle_data_path: str):
         """
-        Initialise le matcher de puzzle
+        Initialise le solveur de puzzle avec DFS et backtracking
 
         Args:
             puzzle_data_path: Chemin vers le fichier JSON contenant toutes les données
-            grid_size: Taille de la grille (rows, cols) - default (4, 6) pour 24 pièces
         """
-        self.grid_rows, self.grid_cols = grid_size
-        self.total_pieces = self.grid_rows * self.grid_cols
-
         # Charger les données
         with open(puzzle_data_path, 'r') as f:
             self.puzzle_data = json.load(f)
 
         print(f"Données chargées pour {len(self.puzzle_data)} pièces")
 
+        # Déterminer automatiquement la taille de la grille
+        self.total_pieces = len(self.puzzle_data)
+        self.grid_rows, self.grid_cols = self._determine_grid_size()
+        
+        print(f"Taille de grille déterminée: {self.grid_rows}x{self.grid_cols}")
+
         # Poids pour le scoring
-        self.COLOR_WEIGHT = 0.8
-        self.SHAPE_WEIGHT = 0.2
+        self.COLOR_WEIGHT = 0.7
+        self.SHAPE_WEIGHT = 0.3
 
         # Mappings des côtés selon la rotation
         self.side_rotation_map = {
@@ -67,6 +73,33 @@ class PuzzleMatcher:
 
         # Classifier les pièces par type
         self.classify_pieces()
+
+        # Variables pour le DFS
+        self.max_backtrack_depth = 5
+        self.backtrack_count = 0
+        self.solution_found = False
+
+    def _determine_grid_size(self) -> Tuple[int, int]:
+        """Détermine automatiquement la taille de la grille basée sur le nombre de pièces"""
+        n = self.total_pieces
+        
+        # Trouver les facteurs possibles
+        factors = []
+        for i in range(1, int(math.sqrt(n)) + 1):
+            if n % i == 0:
+                factors.append((i, n // i))
+        
+        # Préférer les grilles proches du carré
+        best_ratio = float('inf')
+        best_size = factors[0]
+        
+        for rows, cols in factors:
+            ratio = max(rows/cols, cols/rows)
+            if ratio < best_ratio:
+                best_ratio = ratio
+                best_size = (rows, cols)
+        
+        return best_size
 
     def classify_pieces(self):
         """Classifie les pièces en coins, bordures et intérieures"""
@@ -142,12 +175,11 @@ class PuzzleMatcher:
         # Convertir en similarité (1 = parfait, 0 = très différent)
         similarity = 1.0 - (avg_distance / max_distance)
 
-        return similarity
+        return max(0.0, min(1.0, similarity))
 
     def calculate_shape_similarity(self, points1: List, points2: List) -> float:
         """
         Calcule la similarité entre deux formes normalisées
-        Version simplifiée pour éviter les erreurs
         """
         if not points1 or not points2 or len(points1) != 17 or len(points2) != 17:
             return 0.5  # Score neutre par défaut
@@ -160,27 +192,20 @@ class PuzzleMatcher:
             # Inverser pts2 pour le matching
             pts2_reversed = pts2[::-1]
 
-            # Calculer la différence des aires sous les courbes
-            area1 = float(pts1[-1][1])  # Utiliser l'aire stockée si disponible
-            area2 = float(pts2_reversed[-1][1])
+            # Calculer la différence des y (hauteurs)
+            y_diff = 0
+            for i in range(len(pts1)):
+                y_diff += abs(pts1[i][1] + pts2_reversed[i][1])  # Somme doit être proche de 0
 
-            # Si les aires ont des signes opposés, c'est bon pour le matching
-            if (area1 > 0 and area2 < 0) or (area1 < 0 and area2 > 0):
-                # Plus les valeurs absolues sont proches, meilleur est le score
-                diff = abs(abs(area1) - abs(area2))
-                max_area = max(abs(area1), abs(area2))
-                if max_area > 0:
-                    similarity = 1.0 - (diff / max_area)
-                else:
-                    similarity = 0.5
-            else:
-                # Mauvais matching si les signes sont identiques
-                similarity = 0.1
+            # Normaliser
+            avg_y_diff = y_diff / len(pts1)
+            
+            # Plus la différence est proche de 0, meilleur est le score
+            similarity = 1.0 / (1.0 + avg_y_diff / 10.0)
 
             return max(0.0, min(1.0, similarity))
 
         except Exception as e:
-            # En cas d'erreur, retourner un score neutre
             return 0.5
 
     def check_gender_compatibility(self, gender1: str, gender2: str) -> bool:
@@ -222,22 +247,11 @@ class PuzzleMatcher:
             side_data2.get('segments', [])
         )
 
-        # Calculer la similarité des formes (utiliser l'aire sous la courbe)
-        shape_score = 0.5  # Score par défaut
-        if 'aire_sous_courbe' in side_data1 and 'aire_sous_courbe' in side_data2:
-            area1 = side_data1['aire_sous_courbe']
-            area2 = side_data2['aire_sous_courbe']
-
-            # Pour un bon match, les aires doivent être opposées
-            if (area1 > 0 and area2 < 0) or (area1 < 0 and area2 > 0):
-                # Calculer la similarité basée sur la différence des valeurs absolues
-                diff = abs(abs(area1) - abs(area2))
-                max_area = max(abs(area1), abs(area2))
-                if max_area > 0:
-                    shape_score = 1.0 - (diff / (2 * max_area))
-                    shape_score = max(0.0, min(1.0, shape_score))
-            else:
-                shape_score = 0.1  # Pénalité si les signes sont identiques
+        # Calculer la similarité des formes
+        shape_score = self.calculate_shape_similarity(
+            side_data1.get('points_normalises', []),
+            side_data2.get('points_normalises', [])
+        )
 
         # Score total pondéré
         total_score = (self.COLOR_WEIGHT * color_score +
@@ -251,378 +265,222 @@ class PuzzleMatcher:
 
         return score
 
-    def find_best_piece_for_position(self, row: int, col: int,
-                                     available_pieces: List[str]) -> Optional[Tuple[str, int, float]]:
-        """
-        Trouve la meilleure pièce pour une position donnée (approche greedy)
-        Retourne (piece_name, rotation, score) ou None
-        """
-        best_score = -1
-        best_piece = None
-        best_rotation = 0
+    def is_valid_placement(self, piece_name: str, rotation: int, row: int, col: int) -> bool:
+        """Vérifie si une pièce peut être placée à une position donnée"""
+        piece_data = self.get_piece_data(piece_name)
+        if not piece_data:
+            return False
 
-        # Déterminer les contraintes de position
-        is_top_edge = (row == 0)
-        is_bottom_edge = (row == self.grid_rows - 1)
-        is_left_edge = (col == 0)
-        is_right_edge = (col == self.grid_cols - 1)
+        # Vérifier les contraintes de bordure
+        if row == 0:  # Bordure haut
+            top_side = self.get_rotated_side('haut', rotation)
+            if piece_data['sides'][top_side]['gender'] != 'neutre':
+                return False
+        else:
+            top_side = self.get_rotated_side('haut', rotation)
+            if piece_data['sides'][top_side]['gender'] == 'neutre':
+                return False
 
-        for piece_name in available_pieces:
-            piece_data = self.get_piece_data(piece_name)
-            if not piece_data:
-                continue
+        if row == self.grid_rows - 1:  # Bordure bas
+            bottom_side = self.get_rotated_side('bas', rotation)
+            if piece_data['sides'][bottom_side]['gender'] != 'neutre':
+                return False
+        else:
+            bottom_side = self.get_rotated_side('bas', rotation)
+            if piece_data['sides'][bottom_side]['gender'] == 'neutre':
+                return False
 
-            # Essayer toutes les rotations
-            for rotation in [0, 90, 180, 270]:
-                valid = True
-                total_score = 0
-                match_count = 0
+        if col == 0:  # Bordure gauche
+            left_side = self.get_rotated_side('gauche', rotation)
+            if piece_data['sides'][left_side]['gender'] != 'neutre':
+                return False
+        else:
+            left_side = self.get_rotated_side('gauche', rotation)
+            if piece_data['sides'][left_side]['gender'] == 'neutre':
+                return False
 
-                # Vérifier les contraintes de bordure
-                if is_top_edge:
-                    top_side = self.get_rotated_side('haut', rotation)
-                    if piece_data['sides'][top_side]['gender'] != 'neutre':
-                        continue
-                else:
-                    # Pas sur le bord haut, donc pas de côté neutre en haut
-                    top_side = self.get_rotated_side('haut', rotation)
-                    if piece_data['sides'][top_side]['gender'] == 'neutre':
-                        continue
+        if col == self.grid_cols - 1:  # Bordure droite
+            right_side = self.get_rotated_side('droite', rotation)
+            if piece_data['sides'][right_side]['gender'] != 'neutre':
+                return False
+        else:
+            right_side = self.get_rotated_side('droite', rotation)
+            if piece_data['sides'][right_side]['gender'] == 'neutre':
+                return False
 
-                if is_bottom_edge:
-                    bottom_side = self.get_rotated_side('bas', rotation)
-                    if piece_data['sides'][bottom_side]['gender'] != 'neutre':
-                        continue
-                else:
-                    bottom_side = self.get_rotated_side('bas', rotation)
-                    if piece_data['sides'][bottom_side]['gender'] == 'neutre':
-                        continue
+        return True
 
-                if is_left_edge:
-                    left_side = self.get_rotated_side('gauche', rotation)
-                    if piece_data['sides'][left_side]['gender'] != 'neutre':
-                        continue
-                else:
-                    left_side = self.get_rotated_side('gauche', rotation)
-                    if piece_data['sides'][left_side]['gender'] == 'neutre':
-                        continue
+    def get_compatibility_score(self, piece_name: str, rotation: int, row: int, col: int) -> float:
+        """Calcule le score de compatibilité d'une pièce à une position"""
+        if not self.is_valid_placement(piece_name, rotation, row, col):
+            return -1
 
-                if is_right_edge:
-                    right_side = self.get_rotated_side('droite', rotation)
-                    if piece_data['sides'][right_side]['gender'] != 'neutre':
-                        continue
-                else:
-                    right_side = self.get_rotated_side('droite', rotation)
-                    if piece_data['sides'][right_side]['gender'] == 'neutre':
-                        continue
+        total_score = 0
+        neighbor_count = 0
 
-                # Vérifier la compatibilité avec les pièces adjacentes
-                # Gauche
-                if col > 0 and self.grid[row][col - 1]:
-                    neighbor = self.grid[row][col - 1]
-                    neighbor_right = self.get_rotated_side('droite', neighbor.rotation)
-                    my_left = self.get_rotated_side('gauche', rotation)
+        # Vérifier chaque voisin
+        neighbors = [
+            (row - 1, col, 'haut', 'bas'),    # Voisin du haut
+            (row, col + 1, 'droite', 'gauche'), # Voisin de droite
+            (row + 1, col, 'bas', 'haut'),    # Voisin du bas
+            (row, col - 1, 'gauche', 'droite') # Voisin de gauche
+        ]
 
-                    score = self.calculate_match_score(
-                        piece_name, my_left,
-                        neighbor.filename, neighbor_right
-                    )
+        for n_row, n_col, my_side, neighbor_side in neighbors:
+            if (0 <= n_row < self.grid_rows and 0 <= n_col < self.grid_cols and
+                self.grid[n_row][n_col] is not None):
+                
+                neighbor = self.grid[n_row][n_col]
+                my_rotated_side = self.get_rotated_side(my_side, rotation)
+                neighbor_rotated_side = self.get_rotated_side(neighbor_side, neighbor.rotation)
 
-                    if not score.is_valid:
-                        valid = False
-                        break
+                match_score = self.calculate_match_score(
+                    piece_name, my_rotated_side,
+                    neighbor.filename, neighbor_rotated_side
+                )
 
-                    total_score += score.total_score
-                    match_count += 1
+                if not match_score.is_valid:
+                    return -1  # Incompatible
 
-                # Haut
-                if valid and row > 0 and self.grid[row - 1][col]:
-                    neighbor = self.grid[row - 1][col]
-                    neighbor_bottom = self.get_rotated_side('bas', neighbor.rotation)
-                    my_top = self.get_rotated_side('haut', rotation)
+                total_score += match_score.total_score
+                neighbor_count += 1
 
-                    score = self.calculate_match_score(
-                        piece_name, my_top,
-                        neighbor.filename, neighbor_bottom
-                    )
+        # Si pas de voisins, retourner un score neutre
+        if neighbor_count == 0:
+            return 0.5
 
-                    if not score.is_valid:
-                        valid = False
-                        break
+        return total_score / neighbor_count
 
-                    total_score += score.total_score
-                    match_count += 1
-
-                # Si aucun voisin, mais position valide, donner un score de base
-                if valid and match_count == 0:
-                    total_score = 0.5  # Score de base pour les positions sans voisins
-                    match_count = 1
-
-                if valid and match_count > 0:
-                    avg_score = total_score / match_count
-                    if avg_score > best_score:
-                        best_score = avg_score
-                        best_piece = piece_name
-                        best_rotation = rotation
-
-        if best_piece:
-            return (best_piece, best_rotation, best_score)
-
+    def get_next_position(self) -> Optional[Tuple[int, int]]:
+        """Retourne la prochaine position vide dans la grille"""
+        for row in range(self.grid_rows):
+            for col in range(self.grid_cols):
+                if self.grid[row][col] is None:
+                    return (row, col)
         return None
 
-    def place_corner(self, row: int, col: int) -> bool:
-        """Place une pièce de coin à une position donnée"""
-        for piece_name in self.corner_pieces:
-            if piece_name in self.placed_pieces:
-                continue
+    def get_best_candidates(self, row: int, col: int, available_pieces: List[str], max_candidates: int = 5) -> List[Tuple[str, int, float]]:
+        """Retourne les meilleurs candidats pour une position triés par score"""
+        candidates = []
 
-            piece_data = self.get_piece_data(piece_name)
-            neutral_sides = self.get_neutral_sides(piece_data)
-
-            # Trouver la bonne rotation pour ce coin
+        for piece_name in available_pieces:
             for rotation in [0, 90, 180, 270]:
-                rotated_neutrals = [self.get_rotated_side(side, rotation)
-                                    for side in neutral_sides]
+                score = self.get_compatibility_score(piece_name, rotation, row, col)
+                if score >= 0:  # Valide
+                    candidates.append((piece_name, rotation, score))
 
-                valid = True
+        # Trier par score décroissant
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        
+        # Retourner les meilleurs candidats
+        return candidates[:max_candidates]
 
-                # Vérifier que les côtés neutres sont bien orientés
-                if row == 0 and 'haut' not in rotated_neutrals:
-                    valid = False
-                if row == self.grid_rows - 1 and 'bas' not in rotated_neutrals:
-                    valid = False
-                if col == 0 and 'gauche' not in rotated_neutrals:
-                    valid = False
-                if col == self.grid_cols - 1 and 'droite' not in rotated_neutrals:
-                    valid = False
+    def place_piece(self, piece_name: str, rotation: int, row: int, col: int):
+        """Place une pièce sur la grille"""
+        self.grid[row][col] = PieceInfo(piece_name, rotation, (row, col))
+        self.placed_pieces.add(piece_name)
 
-                # Vérifier qu'on a exactement les bons côtés neutres
-                expected_neutrals = []
-                if row == 0:
-                    expected_neutrals.append('haut')
-                if row == self.grid_rows - 1:
-                    expected_neutrals.append('bas')
-                if col == 0:
-                    expected_neutrals.append('gauche')
-                if col == self.grid_cols - 1:
-                    expected_neutrals.append('droite')
+    def remove_piece(self, row: int, col: int):
+        """Retire une pièce de la grille"""
+        if self.grid[row][col]:
+            piece_name = self.grid[row][col].filename
+            self.placed_pieces.remove(piece_name)
+            self.grid[row][col] = None
 
-                if valid and set(rotated_neutrals) == set(expected_neutrals):
-                    self.grid[row][col] = PieceInfo(piece_name, rotation, (row, col))
-                    self.placed_pieces.add(piece_name)
-                    return True
-
-        return False
-
-    def solve_greedy(self, max_time: int = 120) -> bool:
+    def solve_dfs(self, max_time: int = 300) -> bool:
         """
-        Résout le puzzle avec une approche greedy
+        Résout le puzzle avec DFS et backtracking
 
         Args:
-            max_time: Temps maximum en secondes (default: 120s = 2 minutes)
+            max_time: Temps maximum en secondes (default: 300s = 5 minutes)
 
         Returns:
             True si résolu, False sinon
         """
         start_time = time.time()
+        self.solution_found = False
+        self.backtrack_count = 0
 
-        print(f"\nDémarrage de la résolution du puzzle {self.grid_rows}x{self.grid_cols}")
+        print(f"\nDémarrage de la résolution DFS du puzzle {self.grid_rows}x{self.grid_cols}")
         print(f"Nombre total de pièces: {self.total_pieces}")
 
-        # Étape 1: Placer les coins
-        corner_positions = [
-            (0, 0), (0, self.grid_cols - 1),
-            (self.grid_rows - 1, 0), (self.grid_rows - 1, self.grid_cols - 1)
-        ]
+        # Étape 1: Choisir une pièce de coin aléatoire pour commencer
+        if self.corner_pieces:
+            start_piece = random.choice(self.corner_pieces)
+            print(f"Pièce de coin sélectionnée: {start_piece}")
+        else:
+            start_piece = random.choice([p['filename'] for p in self.puzzle_data])
+            print(f"Aucun coin disponible, pièce aléatoire sélectionnée: {start_piece}")
 
-        corners_placed = 0
-        for row, col in corner_positions:
-            if self.place_corner(row, col):
-                corners_placed += 1
+        # Placer la pièce de départ au coin supérieur gauche
+        piece_data = self.get_piece_data(start_piece)
+        if piece_data:
+            # Trouver la bonne rotation pour le coin supérieur gauche
+            for rotation in [0, 90, 180, 270]:
+                if self.is_valid_placement(start_piece, rotation, 0, 0):
+                    self.place_piece(start_piece, rotation, 0, 0)
+                    print(f"Pièce de départ placée: {start_piece} à (0,0) avec rotation {rotation}")
+                    break
 
-        print(f"Coins placés: {corners_placed}/4")
+            # Commencer le DFS
+            available_pieces = [p['filename'] for p in self.puzzle_data if p['filename'] not in self.placed_pieces]
+            
+            success = self._dfs_recursive(available_pieces, start_time, max_time)
+            
+            elapsed_time = time.time() - start_time
+            print(f"\nRésolution terminée en {elapsed_time:.2f} secondes")
+            print(f"Nombre de backtracks: {self.backtrack_count}")
+            print(f"Pièces placées: {len(self.placed_pieces)}/{self.total_pieces}")
 
-        if corners_placed != 4:
-            print("ERREUR: Impossible de placer tous les coins!")
+            return success
+
+        return False
+
+    def _dfs_recursive(self, available_pieces: List[str], start_time: float, max_time: int) -> bool:
+        """Fonction récursive DFS avec backtracking"""
+        # Vérifier le temps limite
+        if time.time() - start_time > max_time:
+            print("Temps limite atteint!")
             return False
 
-        # Étape 2: Placer les bordures
-        print("\nPlacement des pièces de bordure...")
+        # Si toutes les pièces sont placées, succès!
+        if len(self.placed_pieces) == self.total_pieces:
+            self.solution_found = True
+            return True
 
-        # Positions de bordure (dans l'ordre pour favoriser la continuité)
-        border_positions = []
+        # Trouver la prochaine position vide
+        next_pos = self.get_next_position()
+        if not next_pos:
+            return True  # Plus de positions vides
 
-        # Bordure du haut (de gauche à droite)
-        for col in range(1, self.grid_cols - 1):
-            border_positions.append((0, col))
+        row, col = next_pos
 
-        # Bordure droite (de haut en bas)
-        for row in range(1, self.grid_rows - 1):
-            border_positions.append((row, self.grid_cols - 1))
+        # Obtenir les meilleurs candidats pour cette position
+        candidates = self.get_best_candidates(row, col, available_pieces)
 
-        # Bordure du bas (de droite à gauche)
-        for col in range(self.grid_cols - 2, 0, -1):
-            border_positions.append((self.grid_rows - 1, col))
+        if not candidates:
+            # Aucun candidat valide, backtrack
+            self.backtrack_count += 1
+            return False
 
-        # Bordure gauche (de bas en haut)
-        for row in range(self.grid_rows - 2, 0, -1):
-            border_positions.append((row, 0))
+        # Essayer chaque candidat
+        for piece_name, rotation, score in candidates:
+            # Placer la pièce
+            self.place_piece(piece_name, rotation, row, col)
+            
+            # Mettre à jour les pièces disponibles
+            new_available = [p for p in available_pieces if p != piece_name]
+            
+            # Appel récursif
+            if self._dfs_recursive(new_available, start_time, max_time):
+                return True
+            
+            # Backtrack: retirer la pièce
+            self.remove_piece(row, col)
 
-        print(f"Positions de bordure à remplir: {len(border_positions)}")
-
-        # Placer les bordures
-        borders_placed = 0
-        for row, col in border_positions:
-            if time.time() - start_time > max_time:
-                print("Temps limite atteint!")
-                return False
-
-            candidates = [p for p in self.border_pieces if p not in self.placed_pieces]
-
-            if candidates:
-                result = self.find_best_piece_for_position(row, col, candidates)
-                if result:
-                    piece_name, rotation, score = result
-                    self.grid[row][col] = PieceInfo(piece_name, rotation, (row, col))
-                    self.placed_pieces.add(piece_name)
-                    borders_placed += 1
-                    print(f"  Bordure placée: {piece_name} à ({row},{col}) avec score {score:.3f}")
-
-        print(f"Bordures placées: {borders_placed}/{len(border_positions)}")
-        print(f"Total pièces placées: {len(self.placed_pieces)}/{self.total_pieces}")
-
-        # Étape 3: Remplir l'intérieur avec une approche ligne par ligne
-        print("\nRemplissage de l'intérieur...")
-
-        # Remplir ligne par ligne pour maximiser les contraintes
-        interior_placed = 0
-        for row in range(1, self.grid_rows - 1):
-            for col in range(1, self.grid_cols - 1):
-                if time.time() - start_time > max_time:
-                    print("Temps limite atteint!")
-                    return False
-
-                if self.grid[row][col] is None:
-                    candidates = [p for p in self.interior_pieces if p not in self.placed_pieces]
-
-                    if candidates:
-                        result = self.find_best_piece_for_position(row, col, candidates)
-                        if result:
-                            piece_name, rotation, score = result
-                            self.grid[row][col] = PieceInfo(piece_name, rotation, (row, col))
-                            self.placed_pieces.add(piece_name)
-                            interior_placed += 1
-                            print(f"  Intérieur placé: {piece_name} à ({row},{col}) avec score {score:.3f}")
-
-        print(f"Pièces intérieures placées: {interior_placed}")
-
-        # Si il reste des pièces non placées, essayer de les forcer
-        if len(self.placed_pieces) < self.total_pieces:
-            print(f"\nTentative de placement des {self.total_pieces - len(self.placed_pieces)} pièces restantes...")
-
-            remaining_pieces = [p['filename'] for p in self.puzzle_data
-                                if p['filename'] not in self.placed_pieces]
-
-            for row in range(self.grid_rows):
-                for col in range(self.grid_cols):
-                    if self.grid[row][col] is None and remaining_pieces:
-                        # Essayer toutes les pièces restantes
-                        best_forced = None
-                        best_forced_score = -float('inf')
-
-                        for piece_name in remaining_pieces:
-                            for rotation in [0, 90, 180, 270]:
-                                # Calculer un score même si pas parfait
-                                score = self.calculate_position_score(piece_name, rotation, row, col)
-                                if score > best_forced_score:
-                                    best_forced_score = score
-                                    best_forced = (piece_name, rotation)
-
-                        if best_forced:
-                            piece_name, rotation = best_forced
-                            self.grid[row][col] = PieceInfo(piece_name, rotation, (row, col))
-                            self.placed_pieces.add(piece_name)
-                            remaining_pieces.remove(piece_name)
-                            print(f"  Placement forcé: {piece_name} à ({row},{col})")
-
-        elapsed_time = time.time() - start_time
-        print(f"\nRésolution terminée en {elapsed_time:.2f} secondes")
-        print(f"Pièces placées: {len(self.placed_pieces)}/{self.total_pieces}")
-
-        return len(self.placed_pieces) == self.total_pieces
-
-    def calculate_position_score(self, piece_name: str, rotation: int, row: int, col: int) -> float:
-        """Calcule un score pour une pièce à une position donnée, même si pas parfait"""
-        piece_data = self.get_piece_data(piece_name)
-        if not piece_data:
-            return -float('inf')
-
-        score = 0.0
-        matches = 0
-
-        # Pénalité pour violation des contraintes de bordure
-        penalty = 0
-
-        # Vérifier les contraintes de bordure
-        if row == 0:
-            side = self.get_rotated_side('haut', rotation)
-            if piece_data['sides'][side]['gender'] != 'neutre':
-                penalty += 10
-        elif row == self.grid_rows - 1:
-            side = self.get_rotated_side('bas', rotation)
-            if piece_data['sides'][side]['gender'] != 'neutre':
-                penalty += 10
-
-        if col == 0:
-            side = self.get_rotated_side('gauche', rotation)
-            if piece_data['sides'][side]['gender'] != 'neutre':
-                penalty += 10
-        elif col == self.grid_cols - 1:
-            side = self.get_rotated_side('droite', rotation)
-            if piece_data['sides'][side]['gender'] != 'neutre':
-                penalty += 10
-
-        # Bonus si pas de pénalité de bordure
-        if penalty == 0:
-            score += 0.5
-
-        # Vérifier la compatibilité avec les voisins
-        neighbors = [
-            (row - 1, col, 'haut', 'bas'),
-            (row, col + 1, 'droite', 'gauche'),
-            (row + 1, col, 'bas', 'haut'),
-            (row, col - 1, 'gauche', 'droite')
-        ]
-
-        for n_row, n_col, my_side, neighbor_side in neighbors:
-            if 0 <= n_row < self.grid_rows and 0 <= n_col < self.grid_cols:
-                neighbor = self.grid[n_row][n_col]
-                if neighbor:
-                    my_rotated_side = self.get_rotated_side(my_side, rotation)
-                    neighbor_rotated_side = self.get_rotated_side(neighbor_side, neighbor.rotation)
-
-                    match_score = self.calculate_match_score(
-                        piece_name, my_rotated_side,
-                        neighbor.filename, neighbor_rotated_side
-                    )
-
-                    if match_score.is_valid:
-                        score += match_score.total_score
-                        matches += 1
-                    else:
-                        # Pénalité pour incompatibilité de genre
-                        score -= 5
-
-        # Normaliser par le nombre de voisins
-        if matches > 0:
-            score = score / matches
-
-        # Appliquer la pénalité de bordure
-        score -= penalty
-
-        return score
-
-        return len(self.placed_pieces) == self.total_pieces
+        # Aucune solution trouvée avec les candidats actuels
+        self.backtrack_count += 1
+        return False
 
     def get_solution(self) -> Dict:
         """Retourne la solution sous forme de dictionnaire"""
@@ -643,7 +501,7 @@ class PuzzleMatcher:
 
         return solution
 
-    def save_solution(self, output_path: str = "puzzle_solution.json"):
+    def save_solution(self, output_path: str = "puzzle_solution_dfs.json"):
         """Sauvegarde la solution dans un fichier JSON"""
         solution = self.get_solution()
 
@@ -654,7 +512,7 @@ class PuzzleMatcher:
 
     def display_solution(self):
         """Affiche la solution sous forme de grille textuelle"""
-        print("\n=== SOLUTION DU PUZZLE ===")
+        print("\n=== SOLUTION DU PUZZLE (DFS) ===")
         print(f"Grille {self.grid_rows}x{self.grid_cols}\n")
 
         for row in range(self.grid_rows):
@@ -684,39 +542,28 @@ class PuzzleMatcher:
 
 
 def main():
-    """Fonction principale pour tester le matcher"""
-    # D'abord, fusionner les fichiers JSON si nécessaire
-    import os
-    if not os.path.exists("puzzle_complete_data.json"):
-        print("Fichier puzzle_complete_data.json non trouvé. Fusion des fichiers JSON...")
-        from json_merger import PuzzleDataMerger
-        merger = PuzzleDataMerger()
-        merged_data = merger.run()
-        if not merged_data:
-            print("Erreur lors de la fusion des fichiers JSON")
-            return
-
-    # Créer le matcher
-    matcher = PuzzleMatcher(
-        puzzle_data_path="puzzle_complete_data.json",
-        grid_size=(4, 6)  # 24 pièces
+    """Fonction principale pour tester le solveur DFS"""
+    # Créer le solveur DFS
+    solver = DFSPuzzleSolver(
+        puzzle_data_path="puzzle_complete_data.json"
     )
 
-    # Résoudre le puzzle avec l'approche greedy
-    success = matcher.solve_greedy(max_time=120)  # 2 minutes max
+    # Résoudre le puzzle avec DFS et backtracking
+    success = solver.solve_dfs(max_time=300)  # 5 minutes max
 
     if success:
         print("\n✓ Puzzle résolu avec succès!")
 
         # Afficher la solution
-        matcher.display_solution()
+        solver.display_solution()
 
         # Sauvegarder la solution
-        matcher.save_solution("puzzle_solution.json")
+        solver.save_solution("puzzle_solution_dfs.json")
 
         # Afficher quelques statistiques
-        solution = matcher.get_solution()
+        solution = solver.get_solution()
         print(f"\nNombre de pièces placées: {len(solution['pieces'])}")
+        print(f"Nombre de backtracks effectués: {solver.backtrack_count}")
 
         # Créer un rapport détaillé
         print("\n=== RAPPORT DE MATCHING ===")
@@ -738,13 +585,13 @@ def main():
             ]
 
             for n_row, n_col, my_side, neighbor_side in neighbors:
-                if 0 <= n_row < matcher.grid_rows and 0 <= n_col < matcher.grid_cols:
-                    neighbor = matcher.grid[n_row][n_col]
+                if 0 <= n_row < solver.grid_rows and 0 <= n_col < solver.grid_cols:
+                    neighbor = solver.grid[n_row][n_col]
                     if neighbor:
-                        my_rotated = matcher.get_rotated_side(my_side, rotation)
-                        neighbor_rotated = matcher.get_rotated_side(neighbor_side, neighbor.rotation)
+                        my_rotated = solver.get_rotated_side(my_side, rotation)
+                        neighbor_rotated = solver.get_rotated_side(neighbor_side, neighbor.rotation)
 
-                        score = matcher.calculate_match_score(
+                        score = solver.calculate_match_score(
                             piece_name, my_rotated,
                             neighbor.filename, neighbor_rotated
                         )
@@ -757,15 +604,16 @@ def main():
             avg_score = total_score / match_count
             print(f"Score moyen des connexions: {avg_score:.3f}")
             print(f"Nombre total de connexions: {match_count}")
+            
+        
 
     else:
         print("\n✗ Impossible de résoudre complètement le puzzle")
-        print(f"Pièces placées: {len(matcher.placed_pieces)}/{matcher.total_pieces}")
+        print(f"Pièces placées: {len(solver.placed_pieces)}/{solver.total_pieces}")
 
         # Afficher quand même la solution partielle
-        matcher.display_solution()
-        matcher.save_solution("puzzle_solution_partial.json")
-
+        solver.display_solution()
+        solver.save_solution("puzzle_solution_dfs_partial.json")
 
 if __name__ == "__main__":
     main()

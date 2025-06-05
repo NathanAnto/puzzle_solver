@@ -9,10 +9,10 @@ scripts = [
     "sepa_normalise_finale.py",
     "sepa_couleur_final.py",
     "extra_couleur_final.py",
-    "sepa_types.py.py",
+    "sepa_types_final.py",
     "assemblage_json_final_final.py",
     "matching_final_3.py",
-    "creation_final_3.py"
+    "show_result.py"
 ]
 
 for script in scripts:
